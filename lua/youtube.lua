@@ -1,5 +1,13 @@
 args = { ... }
 
+local function get_video_id(url)
+	local parts = {}
+	for part in string.gmatch(url, "[^=]+") do
+		parts[#parts + 1] = part
+	end
+	return parts[#parts]
+end
+
 local function setup_monitor(side)
 	local monitor = peripheral.wrap(side)
 	monitor.setTextScale(0.5)
@@ -87,40 +95,39 @@ local function ask_for_video()
 	return url
 end
 
-
 local function main()
 	local side = "top"
-	local ws_url = "ws://ts.smptp.fr/websocket"
-
+	local ws_url = "ws://ts.smptp.fr/cinema/websocket/new"
 	local url = ask_for_video()
 	print("URL is " .. url)
-
-
+	local new_socket = http.websocket(ws_url)
+	new_socket.send(url)
+	print("Downloading video...")
+	local socket_id = new_socket.receive()
+	local youtube_id = get_video_id(url)
+	new_socket.close()
+	print("Socket id is " .. socket_id)
+	local video_url = "ws://ts.smptp.fr/cinema/websocket/" .. socket_id .. "/video"
+	local audio_url = "http://ts.smptp.fr/cinema/file/" .. youtube_id .. "/output_left.dfpwm"
+	local video_socket = assert(http.websocket(video_url))
 	local monitor = setup_monitor(side)
 	local width, height = monitor.getSize()
-
-	local ws = assert(http.websocket(ws_url))
-	ws.send("size: " .. width .. ":" .. height)
-	print("Size sended...")
-	ws.send("url: " .. url)
-	print("URL sended...")
-	print("Waiting for data")
-	local audio_file = ws.receive()
-	print("Audio file is " .. audio_file)
-	-- shell.run("bg", "speaker", "play http://ts.smptp.fr/file/" .. audio_file)
-	shell.run("bg", "sspeaker")
-	local in_loop = true
 	local image_counter = 0
-	local begin_time = os.epoch("utc")
+	local in_loop = true
+	shell.run(
+		"bg",
+		"speaker",
+		"play",
+		audio_url
+	)
 	while in_loop do
+		video_socket.send(width .. "x" .. height)
 		image_counter = image_counter + 1
 		local begin_time = os.epoch("utc")
-		image_data = ws.receive()
+		image_data = video_socket.receive()
 		local end_time = os.epoch("utc")
 		if #image_data == 4 then
-			if image_data == "stop" then
-				in_loop = false
-			end
+			if image_data == "stop" then in_loop = false end
 		else
 			local render_time, palette_time = render_image_data(monitor, image_data)
 			term.clear()
@@ -130,7 +137,6 @@ local function main()
 			print("FPS: " .. math.floor(1000 / (render_time + palette_time)))
 			monitor.setTextScale(0.5)
 			width, height = monitor.getSize()
-			ws.send("size: " .. width .. ":" .. height)
 		end
 	end
 	local end_time = os.epoch("utc")
@@ -140,3 +146,123 @@ local function main()
 end
 
 main()
+
+-- local function render_video(url)
+-- 	local side = "top"
+-- 	local monitor = setup_monitor(side)
+-- 	local width, height = monitor.getSize()
+-- 	local video_socket = assert(http.websocket(url))
+-- 	local image_counter = 0
+-- 	local in_loop = true
+-- 	while in_loop do
+-- 		video_socket.send(width .. "x" .. height)
+-- 		image_counter = image_counter + 1
+-- 		local begin_time = os.epoch("utc")
+-- 		image_data = video_socket.receive()
+-- 		local end_time = os.epoch("utc")
+-- 		if #image_data == 4 then
+-- 			if image_data == "stop" then in_loop = false end
+-- 		else
+-- 			local render_time, palette_time = render_image_data(monitor, image_data)
+-- 			term.clear()
+-- 			print("Render time: " .. render_time .. "ms")
+-- 			print("Palette time: " .. palette_time .. "ms")
+-- 			print("Network time: " .. (end_time - begin_time) .. "ms")
+-- 			print("FPS: " .. math.floor(1000 / (render_time + palette_time)))
+-- 			monitor.setTextScale(0.5)
+-- 			width, height = monitor.getSize()
+-- 			video_socket.send(width .. "x" .. height)
+-- 		end
+-- 	end
+-- 	local end_time = os.epoch("utc")
+-- 	print("Total time: " .. (end_time - begin_time) .. "ms")
+-- 	print("Total time: " .. (end_time - begin_time) / 1000 .. "s")
+-- 	monitor.clear()
+-- end
+--
+-- local function render_audio(url, side)
+-- 	local speaker = peripheral.wrap(side)
+-- 	local audio_socket = assert(http.websocket(url))
+-- 	local in_loop = true
+-- 	local decoder = require "cc.audio.dfpwm".make_decoder()
+-- 	local sample_rate = audio_socket.receive()
+-- 	print("Sample rate is " .. sample_rate)
+-- 	while in_loop do
+-- 		local audio_data = audio_socket.receive()
+-- 		if #audio_data == 4 then
+-- 			if audio_data == "stop" then in_loop = false end
+-- 		else
+-- 			local buffer = decoder(audio_data)
+-- 			while not speaker.playAudio(buffer) do
+-- 				os.pullEvent("speaker_audio_empty")
+-- 			end
+-- 		end
+-- 		audio_socket.send("ok")
+-- 	end
+-- end
+--
+-- local function render_audio_http(url, side)
+-- 	local speaker = peripheral.wrap(side)
+--
+-- 	local handle, err = http.get { url = url, binary = true }
+--
+-- 	if not handle then
+-- 		printError("Failed to download audio file")
+-- 		error(err, 0)
+-- 	end
+--
+-- 	local decoder = require "cc.audio.dfpwm".make_decoder()
+-- 	print("Playing audio...")
+-- 	local start_time = os.epoch("utc")
+-- 	while true do
+-- 		local chunk = handle.read(16 * 1024)
+-- 		if (not chunk) then
+-- 			print("Audio file ended")
+-- 			break
+-- 		end
+-- 		local buffer = decoder(chunk)
+-- 		while not speaker.playAudio(buffer) do
+-- 			os.pullEvent("speaker_audio_empty")
+-- 		end
+-- 	end
+-- 	local end_time = os.epoch("utc")
+-- 	handle.close()
+--
+-- 	print("Audio played")
+-- 	print("Time: " .. (end_time - start_time) .. "ms")
+-- 	print("Time: " .. ((end_time - start_time) / 1000) .. "s")
+-- end
+--
+-- local function main()
+-- 	local ws_url = "ws://ts.smptp.fr/websocket/new"
+--
+-- 	local url = ask_for_video()
+-- 	print("URL is " .. url)
+-- 	local new_socket = http.websocket(ws_url)
+-- 	new_socket.send(url)
+-- 	print("Downloading video...")
+-- 	local socket_id = new_socket.receive()
+-- 	new_socket.close()
+-- 	print("Socket id is " .. socket_id)
+-- 	local video_url = "ws://ts.smptp.fr/websocket/" .. socket_id .. "/video"
+-- 	local audio_right_url = "http://ts.smptp.fr/file/output_left.dfpwm"
+-- 	local audio_left_url = "http://ts.smptp.fr/file/output_right.dfpwm"
+-- 	parallel.waitForAll(
+-- 		function()
+-- 			render_audio_http(audio_right_url, "right")
+-- 		end,
+-- 		function()
+-- 			render_video(video_url)
+-- 		end
+-- 	)
+-- 	-- local audio_left_url = "ws://ts.smptp.fr/websocket/" .. socket_id .. "/audio/left"
+-- 	-- local audio_right_url = "ws://ts.smptp.fr/websocket/" .. socket_id .. "/audio/right"
+-- 	-- print("Playing video...")
+-- 	-- shell.run(
+-- 	-- 	"bg",
+-- 	-- 	"speaker",
+-- 	-- 	"play",
+-- 	-- 	audio_left_url
+-- 	-- )
+-- 	-- render_video(video_url)
+-- end

@@ -1,6 +1,6 @@
 local speaker = peripheral.wrap("left")
 
-local handle, err = http.get { url = "http://ts.smptp.fr/file/audioL.dfpwm", binary = true }
+local handle, err = http.get { url = "http://ts.smptp.fr/file/output_left.dfpwm", binary = true }
 
 if not handle then
   printError("Failed to download audio file")

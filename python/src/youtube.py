@@ -2,14 +2,14 @@ import asyncio
 import cv2
 import subprocess
 import random
+import argparse
+import os
 import numpy as np
 from websockets.server import serve
 from pytube import YouTube
 from PIL import Image
 from time import time
 from pydub import AudioSegment
-import argparse
-import os
 
 
 def parse_args():
@@ -34,11 +34,17 @@ def parse_args():
 
     arg = argparse.ArgumentParser()
     arg.add_argument(
-            "download_folder",
-            help="Folder to download the video to",
-            type=folder,
-            default="/home/sidotv/dev/computercraft/cinema/download/"
-        )
+        "download_folder",
+        help="Folder to download the video to",
+        type=folder,
+        default="/home/sidotv/dev/computercraft/cinema/download/"
+    )
+    arg.add_argument(
+        "--port",
+        help="Port to listen on",
+        type=int,
+        default=8001
+    )
     return arg.parse_args()
 
 
@@ -50,6 +56,14 @@ def download_video(url, base_folder="."):
     folder_path = base_folder
     video_name = "video.mp4"
     audio_name = "audio.mp3"
+    video_path = f"{folder_path}/{video_name}"
+    audio_path = f"{folder_path}/{audio_name}"
+    # check if the files exists
+    # if the files exists, do not download
+    if os.path.isfile(video_path) and \
+            os.path.isfile(audio_path):
+        print(f"Video already downloaded to {folder_path}")
+        return video_path, audio_path
     yt = YouTube(url)
     yt.streams.filter(
             progressive=True,
@@ -64,14 +78,23 @@ def download_video(url, base_folder="."):
         "ffmpeg",
         "-y",
         "-i",
-        f"{folder_path}/{video_name}",
-        f"{folder_path}/{audio_name}",
+        video_path,
+        "-b:a",
+        "48k",
+        "-ar",
+        "48000",
+        "-vn",
+        audio_path,
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.STDOUT
     )
     print(f"Video downloaded to {folder_path}")
-    return f"{folder_path}/{video_name}", f"{folder_path}/{audio_name}"
+    return video_path, audio_path
+
+
+def get_video_id_from_url(url):
+    return url.split("=")[-1].split("&")[0]
 
 
 class ImageEncoder:
@@ -167,79 +190,141 @@ class VideoEncoder:
 
 
 class AudioEncoder:
-    SAMPLE_RATE = 48000
-    PREC = 10
-
     def __init__(self, audio_path):
         self.audio_path = audio_path
+        download_folder = os.path.dirname(audio_path)
+        self.output_left_path = f"{download_folder}/output_left.dfpwm"
+        self.output_right_path = f"{download_folder}/output_right.dfpwm"
+        if os.path.isfile(self.output_left_path):
+            os.remove(self.output_left_path)
+        if os.path.isfile(self.output_right_path):
+            os.remove(self.output_right_path)
+        if os.path.isfile(self.output_left_path) and os.path.isfile(self.output_right_path):
+            print("Audio already encoded")
+        else:
+            begin_time = time()
+            subprocess.call([
+                "./bin/dfpwm_encoder",
+                self.audio_path,
+                self.output_left_path,
+                self.output_right_path,
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+            end_time = time()
+            print(f"Audio encoded in {end_time - begin_time} seconds")
 
-    def encode_dfpwm(self, input_data):
-        charge = 0
-        strength = 0
-        previous_bit = False
-        out_length = len(input_data) // 8
-        one_second_sample_length = self.SAMPLE_RATE
+    def frame_generator(self, sample_size, side):
+        if side == "left":
+            path = self.output_left_path
+        else:
+            path = self.output_right_path
+        with open(path, "rb") as f:
+            while True:
+                data = f.read(sample_size)
+                if len(data) == 0:
+                    break
+                yield data
 
-        out = np.zeros(one_second_sample_length, dtype=np.uint8)
-
-        PREC = self.PREC
-        PREC_MINUS_8 = PREC - 8
-        ONE_SHIFT_PREC_THEN_MINUS_1 = (1 << PREC) - 1
-        ONE_SHIFT_PREC_MINUS_1 = 1 << (PREC - 1)
-
-        for i in range(out_length):
-            this_byte = 0
-
-            for j in range(8):
-                level = int(input_data[i * 8 + j] * 127)
-
-                current_bit = (level > charge) or (level == charge and charge == 127)
-                target = 127 if current_bit else -128
-
-                next_charge = charge + ((strength * (target - charge) + ONE_SHIFT_PREC_MINUS_1) >> PREC)
-                if next_charge == charge and next_charge != target:
-                    next_charge += 1 if current_bit else -1
-
-                z = ONE_SHIFT_PREC_THEN_MINUS_1 if current_bit == previous_bit else 0
-                next_strength = strength
-                if strength != z:
-                    next_strength += 1 if current_bit == previous_bit else -1
-                if next_strength < 2 << PREC_MINUS_8:
-                    next_strength = 2 << PREC_MINUS_8
-
-                charge = next_charge
-                strength = next_strength
-                previous_bit = current_bit
-
-                this_byte = (this_byte >> 1) + 128 if current_bit else this_byte >> 1
-            out[i % one_second_sample_length] = this_byte
-            if i % one_second_sample_length == one_second_sample_length-1:
-                yield out
-
-    @staticmethod
-    def pydub_to_np(audio):
-        """
-        Converts pydub audio segment into np.float32 of shape [duration_in_seconds*sample_rate, channels],
-        where each value is in range [-1.0, 1.0].
-        Returns tuple audio_np_array.
-        """
-        channel_sounds = audio.split_to_mono()
-        samples = [s.get_array_of_samples() for s in channel_sounds]
-        fp_arr = np.array(samples).T.astype(np.float32)
-        fp_arr /= np.iinfo(samples[0].typecode).max
-        return fp_arr
-
-    def convert_audio(self):
-        input_audio = AudioSegment.from_file(self.audio_path, format="mp3")
-        input_audio = input_audio.set_frame_rate(self.SAMPLE_RATE)
-        input_data = AudioEncoder.pydub_to_np(input_audio)
-        left_channel = input_data[:, 0]
-        right_channel = input_data[:, 1]
-        left_encoded_gen = self.encode_dfpwm(left_channel)
-        right_encoded_gen = self.encode_dfpwm(right_channel)
-        self.left_encoded_gen = left_encoded_gen
-        self.right_encoded_gen = right_encoded_gen
-
+# class AudioEncoder:
+#     SAMPLE_RATE = 48000
+#     PREC = 10
+#
+#     def __init__(self, audio_path):
+#         self.audio_path = audio_path
+#
+#     async def encode_dfpwm(self, input_data, sample_size, queue):
+#         charge = 0
+#         strength = 0
+#         previous_bit = False
+#         out_length = len(input_data) // 8
+#
+#         out = np.zeros(sample_size, dtype=np.uint8)
+#
+#         PREC = self.PREC
+#         PREC_MINUS_8 = PREC - 8
+#         ONE_SHIFT_PREC_THEN_MINUS_1 = (1 << PREC) - 1
+#         ONE_SHIFT_PREC_MINUS_1 = 1 << (PREC - 1)
+#
+#         for i in range(out_length):
+#             this_byte = 0
+#
+#             for j in range(8):
+#                 level = int(input_data[i * 8 + j] * 127)
+#
+#                 current_bit = (level > charge) or (level == charge and charge == 127)
+#                 target = 127 if current_bit else -128
+#
+#                 next_charge = charge + ((strength * (target - charge) + ONE_SHIFT_PREC_MINUS_1) >> PREC)
+#                 if next_charge == charge and next_charge != target:
+#                     next_charge += 1 if current_bit else -1
+#
+#                 z = ONE_SHIFT_PREC_THEN_MINUS_1 if current_bit == previous_bit else 0
+#                 next_strength = strength
+#                 if strength != z:
+#                     next_strength += 1 if current_bit == previous_bit else -1
+#                 if next_strength < 2 << PREC_MINUS_8:
+#                     next_strength = 2 << PREC_MINUS_8
+#
+#                 charge = next_charge
+#                 strength = next_strength
+#                 previous_bit = current_bit
+#
+#                 this_byte = (this_byte >> 1) + 128 if current_bit else this_byte >> 1
+#             out[i % sample_size] = this_byte
+#             if i % sample_size == sample_size-1:
+#                 await queue.put(out)
+#
+#     @staticmethod
+#     def pydub_to_np(audio):
+#         """
+#         Converts pydub audio segment into np.float32 of shape [duration_in_seconds*sample_rate, channels],
+#         where each value is in range [-1.0, 1.0].
+#         Returns tuple audio_np_array.
+#         """
+#         channel_sounds = audio.split_to_mono()
+#         samples = [s.get_array_of_samples() for s in channel_sounds]
+#         fp_arr = np.array(samples).T.astype(np.float32)
+#         fp_arr /= np.iinfo(samples[0].typecode).max
+#         return fp_arr
+#
+#     async def get_next_sample(self, side):
+#         if side == "left":
+#             return await self.left_encoded_queue.get()
+#
+#         elif side == "right":
+#             return await self.right_encoded_queue.get()
+#         else:
+#             raise Exception("Invalid side")
+#
+#     async def convert_audio(self, sample_size):
+#         input_audio = AudioSegment.from_file(self.audio_path, format="mp3")
+#         input_audio = input_audio.set_frame_rate(self.SAMPLE_RATE)
+#         input_data = AudioEncoder.pydub_to_np(input_audio)
+#         left_channel = input_data[:, 0]
+#         right_channel = input_data[:, 1]
+#         # self.left_encoded_queue = asyncio.Queue()
+#         # self.task_left = asyncio.create_task(
+#         #     self.encode_dfpwm(
+#         #         left_channel,
+#         #         sample_size,
+#         #         self.left_encoded_queue
+#         #     )
+#         # )
+#         self.right_encoded_queue = asyncio.Queue(maxsize=1)
+#         self.task_right = asyncio.create_task(
+#             self.encode_dfpwm(
+#                 right_channel,
+#                 sample_size,
+#                 self.right_encoded_queue
+#             )
+#         )
+#
+#     async def has_next_sample(self):
+#         right_task_done = self.task_right.done() if hasattr(self, "task_right") else True
+#         right_task_queue_empty = self.right_encoded_queue.empty() if hasattr(self, "right_encoded_queue") else True
+#         left_task_done = self.task_left.done() if hasattr(self, "task_left") else True
+#         left_task_queue_empty = self.left_encoded_queue.empty() if hasattr(self, "left_encoded_queue") else True
+#         return not (right_task_done and right_task_queue_empty and left_task_done and left_task_queue_empty)
+#
 
 class WebsocketServer:
     __alphabet__ = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -275,7 +360,9 @@ class WebsocketServer:
             await self.new_client(websocket)
         else:
             try:
-                client_id, mode = path.split('/')[1:]
+                params = path.split('/')[1:]
+                client_id = params[0]
+                mode = params[1]
             except ValueError:
                 await websocket.close()
                 return
@@ -293,18 +380,24 @@ class WebsocketServer:
                     client["client"].video = True
                     await client["client"].video_websocket(
                             websocket)
+                    client["video"] = None
                 elif mode == "audio":
                     if client["audio"] is not None:
                         print(f"Client {client_id} already has a audio socket")
                         await websocket.close()
                         return
                     client["client"].audio = True
+                    side = params[2]
                     await client["client"].audio_websocket(
-                            websocket, "left")
+                            websocket, side)
+                    client["audio"] = None
 
     async def new_client(self, websocket):
         print("New client connected...")
+        raw_url = await websocket.recv()
+        video_url = raw_url.strip()
         client_id = self.__gen_client_id__()
+        # client_id = get_video_id_from_url(video_url)
         client = WebsocketClient(
                 client_id,
                 self.download_folder
@@ -314,8 +407,6 @@ class WebsocketServer:
             "video": None,
             "audio": None
         }
-        raw_url = await websocket.recv()
-        video_url = "".join(raw_url.split(':')).strip()
         client.handle(video_url)
         await websocket.send(client_id)
         await websocket.close()
@@ -337,13 +428,12 @@ class WebsocketClient:
 
         # check if the folder client_id exists in the download folder
         # if not, create it
-        # if yes delete all the files in it
-        client_folder = os.path.join(self.download_folder, self.client_id)
+        # if yes check if video.mp4 and audio.mp3 exist
+        # if no delete the folder and create it
+        # if yes do nothing
+        client_folder = os.path.join(self.download_folder, get_video_id_from_url(video_url))
         if not os.path.exists(client_folder):
             os.mkdir(client_folder)
-        else:
-            for file in os.listdir(client_folder):
-                os.remove(os.path.join(client_folder, file))
         self.video_path, self.audio_path = download_video(
                 video_url, client_folder)
         print("Video downloaded")
@@ -378,36 +468,20 @@ class WebsocketClient:
         # itialize the client socket
         # send to the client the size of the frame packets
         # (1s of audio per packets)
-        websocket.send(str(self.audio_encoder.SAMPLE_RATE))
-        if side == "left":
-            audio_data_generator = self.audio_encoder.left_encoded_gen
-        else:
-            audio_data_generator = self.audio_encoder.right_encoded_gen
-        for audio_data in audio_data_generator:
-            # send the audio data to the client
-            websocket.send(audio_data.tobytes())
-            # wait client to be ready for the next packet
+        sample_size = 16 * 1024
+        await websocket.send(str(sample_size))
+        for data in self.audio_encoder.frame_generator(sample_size, side):
+            await websocket.send(data)
             await websocket.recv()
-
-# async def handle_client(websocket, args):
-#     print(f"Client connected: {websocket.remote_address}")
-#     raw_url = await websocket.recv()
-#     url = "".join(raw_url.split(':')[1:]).strip()
-#     print("Received url:", url)
-#
-#     # download the video
-#     print("Downloading video...")
-#     video_path, audio_path = download_video(url, args.download_folder)
-#     print("Video downloaded")
-#     print("Starting video and audio encoding...")
-#     video_encoder = VideoEncoder(video_path)
-#     audio_encoder = AudioEncoder(audio_path)
-#
-#     # generate two random strings to identify the two clients
+        # for audio_data in audio_data_generator:
+        #     # send the audio data to the client
+        #     await websocket.send(audio_data.tobytes())
+        #     # wait client to be ready for the next packet
+        #     await websocket.recv()
 
 
 async def main(args):
-    port = 8001
+    port = args.port
     host = "0.0.0.0"
     server = WebsocketServer(host, port, args.download_folder)
     await server.start()

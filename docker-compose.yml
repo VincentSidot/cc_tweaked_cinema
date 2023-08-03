@@ -1,0 +1,15 @@
+version: "3"
+
+services:
+  cinema:
+    restart: on-failure
+    hostname: cinema
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cc_cinema
+    container_name: cc_cinema
+    ports:
+      - "8001:80"
+    volumes:
+      - ./download/:/videos
