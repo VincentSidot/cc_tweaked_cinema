@@ -9,11 +9,16 @@ fn parse_args() -> (String, String, String) {
     // Parse command line arguments
     // Usage: ./dfpwm-encode <input.mp3> <output_left.dfpwm> <output_right.dfpwm>
     let args: Vec<String> = env::args().collect();
-    if args.len() != 4 {
+    if args.len() != 4 && args.len() != 3 {
         println!("Usage: ./dfpwm-encode <input.mp3> <output_left.dfpwm> <output_right.dfpwm>");
+        println!("Usage: ./dfpwm-encode <input.mp3> <left_right_merged_output.dfpwm> (merged left and right channel in single file, left then right for chunk of size 8*1024 bytes)");
         std::process::exit(1);
     }
-    return (args[1].clone(), args[2].clone(), args[3].clone());
+    if args.len() == 3 {
+        return (args[1].clone(), args[2].clone(), String::from(""));
+    } else {
+        return (args[1].clone(), args[2].clone(), args[3].clone());
+    }
 }
 
 fn encode_dfpwm(input_data: &[f32]) -> Vec<u8> {
@@ -91,17 +96,51 @@ fn convert_audio(input_audio_path: &String) -> (Vec<u8>, Vec<u8>) {
 fn main() {
     let (mp3_path, left_output_path, right_output_path) = parse_args();
 
-    let (left_channel, right_channel) = convert_audio(&mp3_path);
+    if right_output_path == "" {
+        let (left_channel, right_channel) = convert_audio(&mp3_path);
 
-    let mut left_file = File::create(left_output_path).expect("Failed to create left output file");
-    left_file
-        .write_all(&left_channel[..])
-        .expect("Failed to write left output file");
-    let mut right_file =
-        File::create(right_output_path).expect("Failed to create right output file");
-    right_file
-        .write_all(&right_channel[..])
-        .expect("Failed to write right output file");
+        let mut merged_file =
+            File::create(left_output_path).expect("Failed to create merged output file");
 
-    println!("done");
+        let chunk_size = 8 * 1024;
+        let channel_size = left_channel.len();
+
+        for i in 0..(channel_size / chunk_size) {
+            merged_file
+                .write_all(&left_channel[i * chunk_size..(i + 1) * chunk_size])
+                .expect("Failed to write merged output file");
+            merged_file
+                .write_all(&right_channel[i * chunk_size..(i + 1) * chunk_size])
+                .expect("Failed to write merged output file");
+        }
+        merged_file
+            .write_all(&left_channel[channel_size - (channel_size % chunk_size)..])
+            .expect("Failed to write merged output file");
+        merged_file
+            .write_all(&right_channel[channel_size - (channel_size % chunk_size)..])
+            .expect("Failed to write merged output file");
+        merged_file
+            .flush()
+            .expect("Failed to flush merged output file");
+        println!("done");
+        return;
+    } else {
+        let (left_channel, right_channel) = convert_audio(&mp3_path);
+
+        let mut left_file =
+            File::create(left_output_path).expect("Failed to create left output file");
+        left_file
+            .write_all(&left_channel[..])
+            .expect("Failed to write left output file");
+        left_file.flush().expect("Failed to flush left output file");
+        let mut right_file =
+            File::create(right_output_path).expect("Failed to create right output file");
+        right_file
+            .write_all(&right_channel[..])
+            .expect("Failed to write right output file");
+        right_file
+            .flush()
+            .expect("Failed to flush right output file");
+        println!("done");
+    }
 }
